@@ -1,573 +1,643 @@
-from __future__ import print_function
+import asyncio
 import os
 import sys
+sys.path.insert(0, "lib")
+import logging
+import logging.handlers
+import traceback
+import datetime
 import subprocess
-try:                                        # Older Pythons lack this
-    import urllib.request                   # We'll let them reach the Python
-    from importlib.util import find_spec    # check anyway
-except ImportError:
-    pass
-import platform
-import webbrowser
-import hashlib
-import argparse
-import shutil
-import stat
-import time
+
 try:
-    import pip
+    from discord.ext import commands
+    import discord
 except ImportError:
-    pip = None
+    print("Discord.py is not installed.\n"
+          "Consult the guide for your operating system "
+          "and do ALL the steps in order.\n"
+          "https://twentysix26.github.io/Red-Docs/\n")
+    sys.exit(1)
 
-REQS_DIR = "lib"
-sys.path.insert(0, REQS_DIR)
-REQS_TXT = "requirements.txt"
-REQS_NO_AUDIO_TXT = "requirements_no_audio.txt"
-FFMPEG_BUILDS_URL = "https://ffmpeg.zeranoe.com/builds/"
+from cogs.utils.settings import Settings
+from cogs.utils.dataIO import dataIO
+from cogs.utils.chat_formatting import inline
+from collections import Counter
+from io import TextIOWrapper
 
-INTRO = ("==========================\n"
-         "Red Discord Bot - Launcher\n"
-         "==========================\n")
+#
+# Red, a Discord bot by Twentysix, based on discord.py and its command
+#                             extension.
+#
+#                   https://github.com/Twentysix26/
+#
+#
+# red.py and cogs/utils/checks.py both contain some modified functions
+#                     originally made by Rapptz.
+#
+#                 https://github.com/Rapptz/RoboDanny/
+#
 
-IS_WINDOWS = os.name == "nt"
-IS_MAC = sys.platform == "darwin"
-IS_64BIT = platform.machine().endswith("64")
-INTERACTIVE_MODE = not len(sys.argv) > 1  # CLI flags = non-interactive
-PYTHON_OK = sys.version_info >= (3, 5)
-
-FFMPEG_FILES = {
-    "ffmpeg.exe"  : "e0d60f7c0d27ad9d7472ddf13e78dc89",
-    "ffplay.exe"  : "d100abe8281cbcc3e6aebe550c675e09",
-    "ffprobe.exe" : "0e84b782c0346a98434ed476e937764f"
-}
-
-
-def parse_cli_arguments():
-    parser = argparse.ArgumentParser(description="Red - Discord Bot's launcher")
-    parser.add_argument("--start", "-s",
-                        help="Starts Red",
-                        action="store_true")
-    parser.add_argument("--auto-restart",
-                        help="Autorestarts Red in case of issues",
-                        action="store_true")
-    parser.add_argument("--update-red",
-                        help="Updates Red (git)",
-                        action="store_true")
-    parser.add_argument("--update-reqs",
-                        help="Updates requirements (w/ audio)",
-                        action="store_true")
-    parser.add_argument("--update-reqs-no-audio",
-                        help="Updates requirements (w/o audio)",
-                        action="store_true")
-    parser.add_argument("--repair",
-                        help="Issues a git reset --hard",
-                        action="store_true")
-    return parser.parse_args()
+description = "Red - A multifunction Discord bot by Twentysix"
 
 
-def install_reqs(audio):
-    remove_reqs_readonly()
-    interpreter = sys.executable
+class Bot(commands.Bot):
+    def __init__(self, *args, **kwargs):
 
-    if interpreter is None:
-        print("Python interpreter not found.")
-        return
+        def prefix_manager(bot, message):
+            """
+            Returns prefixes of the message's server if set.
+            If none are set or if the message's server is None
+            it will return the global prefixes instead.
 
-    txt = REQS_TXT if audio else REQS_NO_AUDIO_TXT
+            Requires a Bot instance and a Message object to be
+            passed as arguments.
+            """
+            return bot.settings.get_prefixes(message.server)
 
-    args = [
-        interpreter, "-m",
-        "pip", "install",
-        "--upgrade",
-        "--target", REQS_DIR,
-        "-r", txt
-    ]
-
-    if IS_MAC: # --target is a problem on Homebrew. See PR #552
-        args.remove("--target")
-        args.remove(REQS_DIR)
-
-    code = subprocess.call(args)
-
-    if code == 0:
-        print("\nRequirements setup completed.")
-    else:
-        print("\nAn error occurred and the requirements setup might "
-              "not be completed. Consult the docs.\n")
-
-
-def update_pip():
-    interpreter = sys.executable
-
-    if interpreter is None:
-        print("Python interpreter not found.")
-        return
-
-    args = [
-        interpreter, "-m",
-        "pip", "install",
-        "--upgrade", "pip"
-    ]
-
-    code = subprocess.call(args)
-
-    if code == 0:
-        print("\nPip has been updated.")
-    else:
-        print("\nAn error occurred and pip might not have been updated.")
-
-
-def update_red():
-    try:
-        code = subprocess.call(("git", "pull", "--ff-only"))
-    except FileNotFoundError:
-        print("\nError: Git not found. It's either not installed or not in "
-              "the PATH environment variable like requested in the guide.")
-        return
-    if code == 0:
-        print("\nRed has been updated")
-    else:
-        print("\nRed could not update properly. If this is caused by edits "
-              "you have made to the code you can try the repair option from "
-              "the Maintenance submenu")
-
-
-def reset_red(reqs=False, data=False, cogs=False, git_reset=False):
-    if reqs:
-        try:
-            shutil.rmtree(REQS_DIR, onerror=remove_readonly)
-            print("Installed local packages have been wiped.")
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            print("An error occurred when trying to remove installed "
-                  "requirements: {}".format(e))
-    if data:
-        try:
-            shutil.rmtree("data", onerror=remove_readonly)
-            print("'data' folder has been wiped.")
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            print("An error occurred when trying to remove the 'data' folder: "
-                  "{}".format(e))
-
-    if cogs:
-        try:
-            shutil.rmtree("cogs", onerror=remove_readonly)
-            print("'cogs' folder has been wiped.")
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            print("An error occurred when trying to remove the 'cogs' folder: "
-                  "{}".format(e))
-
-    if git_reset:
-        code = subprocess.call(("git", "reset", "--hard"))
-        if code == 0:
-            print("Red has been restored to the last local commit.")
+        self.counter = Counter()
+        self.uptime = datetime.datetime.utcnow()  # Refreshed before login
+        self._message_modifiers = []
+        self.settings = Settings()
+        self._intro_displayed = False
+        self._shutdown_mode = None
+        self.logger = set_logger(self)
+        self._last_exception = None
+        self.oauth_url = ""
+        if 'self_bot' in kwargs:
+            self.settings.self_bot = kwargs['self_bot']
         else:
-            print("The repair has failed.")
+            kwargs['self_bot'] = self.settings.self_bot
+            if self.settings.self_bot:
+                kwargs['pm_help'] = False
+        super().__init__(*args, command_prefix=prefix_manager, **kwargs)
+
+    async def send_message(self, *args, **kwargs):
+        if self._message_modifiers:
+            if "content" in kwargs:
+                pass
+            elif len(args) == 2:
+                args = list(args)
+                kwargs["content"] = args.pop()
+            else:
+                return await super().send_message(*args, **kwargs)
+
+            content = kwargs['content']
+            for m in self._message_modifiers:
+                try:
+                    content = str(m(content))
+                except:   # Faulty modifiers should not
+                    pass  # break send_message
+            kwargs['content'] = content
+
+        return await super().send_message(*args, **kwargs)
+
+    async def shutdown(self, *, restart=False):
+        """Gracefully quits Red with exit code 0
+
+        If restart is True, the exit code will be 26 instead
+        The launcher automatically restarts Red when that happens"""
+        self._shutdown_mode = not restart
+        await self.logout()
+
+    def add_message_modifier(self, func):
+        """
+        Adds a message modifier to the bot
+
+        A message modifier is a callable that accepts a message's
+        content as the first positional argument.
+        Before a message gets sent, func will get called with
+        the message's content as the only argument. The message's
+        content will then be modified to be the func's return
+        value.
+        Exceptions thrown by the callable will be catched and
+        silenced.
+        """
+        if not callable(func):
+            raise TypeError("The message modifier function "
+                            "must be a callable.")
+
+        self._message_modifiers.append(func)
+
+    def remove_message_modifier(self, func):
+        """Removes a message modifier from the bot"""
+        if func not in self._message_modifiers:
+            raise RuntimeError("Function not present in the message "
+                               "modifiers.")
+
+        self._message_modifiers.remove(func)
+
+    def clear_message_modifiers(self):
+        """Removes all message modifiers from the bot"""
+        self._message_modifiers.clear()
+
+    async def send_cmd_help(self, ctx):
+        if ctx.invoked_subcommand:
+            pages = self.formatter.format_help_for(ctx, ctx.invoked_subcommand)
+            for page in pages:
+                await self.send_message(ctx.message.channel, page)
+        else:
+            pages = self.formatter.format_help_for(ctx, ctx.command)
+            for page in pages:
+                await self.send_message(ctx.message.channel, page)
+
+    def user_allowed(self, message):
+        author = message.author
+
+        if author.bot:
+            return False
+
+        if author == self.user:
+            return self.settings.self_bot
+
+        mod_cog = self.get_cog('Mod')
+        global_ignores = self.get_cog('Owner').global_ignores
+
+        if self.settings.owner == author.id:
+            return True
+
+        if author.id in global_ignores["blacklist"]:
+            return False
+
+        if global_ignores["whitelist"]:
+            if author.id not in global_ignores["whitelist"]:
+                return False
+
+        if not message.channel.is_private:
+            server = message.server
+            names = (self.settings.get_server_admin(
+                server), self.settings.get_server_mod(server))
+            results = map(
+                lambda name: discord.utils.get(author.roles, name=name),
+                names)
+            for r in results:
+                if r is not None:
+                    return True
+
+        if mod_cog is not None:
+            if not message.channel.is_private:
+                if message.server.id in mod_cog.ignore_list["SERVERS"]:
+                    return False
+
+                if message.channel.id in mod_cog.ignore_list["CHANNELS"]:
+                    return False
+
+        return True
+
+    async def pip_install(self, name, *, timeout=None):
+        """
+        Installs a pip package in the local 'lib' folder in a thread safe
+        way. On Mac systems the 'lib' folder is not used.
+        Can specify the max seconds to wait for the task to complete
+
+        Returns a bool indicating if the installation was successful
+        """
+
+        IS_MAC = sys.platform == "darwin"
+        interpreter = sys.executable
+
+        if interpreter is None:
+            raise RuntimeError("Couldn't find Python's interpreter")
+
+        args = [
+            interpreter, "-m",
+            "pip", "install",
+            "--upgrade",
+            "--target", "lib",
+            name
+        ]
+
+        if IS_MAC: # --target is a problem on Homebrew. See PR #552
+            args.remove("--target")
+            args.remove("lib")
+
+        def install():
+            code = subprocess.call(args)
+            sys.path_importer_cache = {}
+            return not bool(code)
+
+        response = self.loop.run_in_executor(None, install)
+        return await asyncio.wait_for(response, timeout=timeout)
 
 
-def download_ffmpeg(bitness):
-    clear_screen()
-    repo = "https://github.com/Twentysix26/Red-DiscordBot/raw/master/"
-    verified = []
+class Formatter(commands.HelpFormatter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-    if bitness == "32bit":
-        print("Please download 'ffmpeg 32bit static' from the page that "
-              "is about to open.\nOnce done, open the 'bin' folder located "
-              "inside the zip.\nThere should be 3 files: ffmpeg.exe, "
-              "ffplay.exe, ffprobe.exe.\nPut all three of them into the "
-              "bot's main folder.")
-        time.sleep(4)
-        webbrowser.open(FFMPEG_BUILDS_URL)
+    def _add_subcommands_to_page(self, max_width, commands):
+        for name, command in sorted(commands, key=lambda t: t[0]):
+            if name in command.aliases:
+                # skip aliases
+                continue
+
+            entry = '  {0:<{width}} {1}'.format(name, command.short_doc,
+                                                width=max_width)
+            shortened = self.shorten(entry)
+            self._paginator.add_line(shortened)
+
+
+def initialize(bot_class=Bot, formatter_class=Formatter):
+    formatter = formatter_class(show_check_failure=False)
+
+    bot = bot_class(formatter=formatter, description=description, pm_help=None)
+
+    import __main__
+    __main__.send_cmd_help = bot.send_cmd_help  # Backwards
+    __main__.user_allowed = bot.user_allowed    # compatibility
+    __main__.settings = bot.settings            # sucks
+
+    async def get_oauth_url():
+        try:
+            data = await bot.application_info()
+        except Exception as e:
+            return "Couldn't retrieve invite link.Error: {}".format(e)
+        return discord.utils.oauth_url(data.id)
+
+    async def set_bot_owner():
+        if bot.settings.self_bot:
+            bot.settings.owner = bot.user.id
+            return "[Selfbot mode]"
+
+        if bot.settings.owner:
+            owner = discord.utils.get(bot.get_all_members(),
+                                      id=bot.settings.owner)
+            if not owner:
+                try:
+                    owner = await bot.get_user_info(bot.settings.owner)
+                except:
+                    owner = None
+                if not owner:
+                    owner = bot.settings.owner  # Just the ID then
+            return owner
+
+        how_to = "Do `[p]set owner` in chat to set it"
+
+        if bot.user.bot:  # Can fetch owner
+            try:
+                data = await bot.application_info()
+                bot.settings.owner = data.owner.id
+                bot.settings.save_settings()
+                return data.owner
+            except:
+                return "Failed to fetch owner. " + how_to
+        else:
+            return "Yet to be set. " + how_to
+
+    @bot.event
+    async def on_ready():
+        if bot._intro_displayed:
+            return
+        bot._intro_displayed = True
+
+        owner_cog = bot.get_cog('Owner')
+        total_cogs = len(owner_cog._list_cogs())
+        users = len(set(bot.get_all_members()))
+        servers = len(bot.servers)
+        channels = len([c for c in bot.get_all_channels()])
+
+        login_time = datetime.datetime.utcnow() - bot.uptime
+        login_time = login_time.seconds + login_time.microseconds/1E6
+
+        print("Login successful. ({}ms)\n".format(login_time))
+
+        owner = await set_bot_owner()
+
+        print("-----------------")
+        print("Red - Discord Bot")
+        print("-----------------")
+        print(str(bot.user))
+        print("\nConnected to:")
+        print("{} servers".format(servers))
+        print("{} channels".format(channels))
+        print("{} users\n".format(users))
+        prefix_label = 'Prefix'
+        if len(bot.settings.prefixes) > 1:
+            prefix_label += 'es'
+        print("{}: {}".format(prefix_label, " ".join(bot.settings.prefixes)))
+        print("Owner: " + str(owner))
+        print("{}/{} active cogs with {} commands".format(
+            len(bot.cogs), total_cogs, len(bot.commands)))
+        print("-----------------")
+
+        if bot.settings.token and not bot.settings.self_bot:
+            print("\nUse this url to bring your bot to a server:")
+            url = await get_oauth_url()
+            bot.oauth_url = url
+            print(url)
+
+        print("\nOfficial server: https://discord.gg/red")
+
+        print("Make sure to keep your bot updated. Select the 'Update' "
+              "option from the launcher.")
+
+        await bot.get_cog('Owner').disable_commands()
+
+    @bot.event
+    async def on_resumed():
+        bot.counter["session_resumed"] += 1
+
+    @bot.event
+    async def on_command(command, ctx):
+        bot.counter["processed_commands"] += 1
+
+    @bot.event
+    async def on_message(message):
+        bot.counter["messages_read"] += 1
+        if bot.user_allowed(message):
+            await bot.process_commands(message)
+
+    @bot.event
+    async def on_command_error(error, ctx):
+        channel = ctx.message.channel
+        if isinstance(error, commands.MissingRequiredArgument):
+            await bot.send_cmd_help(ctx)
+        elif isinstance(error, commands.BadArgument):
+            await bot.send_cmd_help(ctx)
+        elif isinstance(error, commands.DisabledCommand):
+            await bot.send_message(channel, "That command is disabled.")
+        elif isinstance(error, commands.CommandInvokeError):
+            # A bit hacky, couldn't find a better way
+            no_dms = "Cannot send messages to this user"
+            is_help_cmd = ctx.command.qualified_name == "help"
+            is_forbidden = isinstance(error.original, discord.Forbidden)
+            if is_help_cmd and is_forbidden and error.original.text == no_dms:
+                msg = ("I couldn't send the help message to you in DM. Either"
+                       " you blocked me or you disabled DMs in this server.")
+                await bot.send_message(channel, msg)
+                return
+
+            bot.logger.exception("Exception in command '{}'".format(
+                ctx.command.qualified_name), exc_info=error.original)
+            message = ("Error in command '{}'. Check your console or "
+                       "logs for details."
+                       "".format(ctx.command.qualified_name))
+            log = ("Exception in command '{}'\n"
+                   "".format(ctx.command.qualified_name))
+            log += "".join(traceback.format_exception(type(error), error,
+                                                      error.__traceback__))
+            bot._last_exception = log
+            await ctx.bot.send_message(channel, inline(message))
+        elif isinstance(error, commands.CommandNotFound):
+            pass
+        elif isinstance(error, commands.CheckFailure):
+            pass
+        elif isinstance(error, commands.NoPrivateMessage):
+            await bot.send_message(channel, "That command is not "
+                                            "available in DMs.")
+        elif isinstance(error, commands.CommandOnCooldown):
+            await bot.send_message(channel, "This command is on cooldown. "
+                                            "Try again in {:.2f}s"
+                                            "".format(error.retry_after))
+        else:
+            bot.logger.exception(type(error).__name__, exc_info=error)
+
+    return bot
+
+
+def check_folders():
+    folders = ("data", "data/red", "cogs", "cogs/utils")
+    for folder in folders:
+        if not os.path.exists(folder):
+            print("Creating " + folder + " folder...")
+            os.makedirs(folder)
+
+
+def interactive_setup(settings):
+    first_run = settings.bot_settings == settings.default_settings
+
+    if first_run:
+        print("Red - First run configuration\n")
+        print("If you haven't already, create a new account:\n"
+              "https://twentysix26.github.io/Red-Docs/red_guide_bot_accounts/"
+              "#creating-a-new-bot-account")
+        print("and obtain your bot's token like described.")
+
+    if not settings.login_credentials:
+        print("\nInsert your bot's token:")
+        while settings.token is None and settings.email is None:
+            choice = input("> ")
+            if "@" not in choice and len(choice) >= 50:  # Assuming token
+                settings.token = choice
+            elif "@" in choice:
+                settings.email = choice
+                settings.password = input("\nPassword> ")
+            else:
+                print("That doesn't look like a valid token.")
+        settings.save_settings()
+
+    if not settings.prefixes:
+        print("\nChoose a prefix. A prefix is what you type before a command."
+              "\nA typical prefix would be the exclamation mark.\n"
+              "Can be multiple characters. You will be able to change it "
+              "later and add more of them.\nChoose your prefix:")
+        confirmation = False
+        while confirmation is False:
+            new_prefix = ensure_reply("\nPrefix> ").strip()
+            print("\nAre you sure you want {0} as your prefix?\nYou "
+                  "will be able to issue commands like this: {0}help"
+                  "\nType yes to confirm or no to change it".format(
+                      new_prefix))
+            confirmation = get_answer()
+        settings.prefixes = [new_prefix]
+        settings.save_settings()
+
+    if first_run:
+        print("\nInput the admin role's name. Anyone with this role in Discord"
+              " will be able to use the bot's admin commands")
+        print("Leave blank for default name (Transistor)")
+        settings.default_admin = input("\nAdmin role> ")
+        if settings.default_admin == "":
+            settings.default_admin = "Transistor"
+        settings.save_settings()
+
+        print("\nInput the moderator role's name. Anyone with this role in"
+              " Discord will be able to use the bot's mod commands")
+        print("Leave blank for default name (Process)")
+        settings.default_mod = input("\nModerator role> ")
+        if settings.default_mod == "":
+            settings.default_mod = "Process"
+        settings.save_settings()
+
+        print("\nThe configuration is done. Leave this window always open to"
+              " keep Red online.\nAll commands will have to be issued through"
+              " Discord's chat, *this window will now be read only*.\n"
+              "Please read this guide for a good overview on how Red works:\n"
+              "https://twentysix26.github.io/Red-Docs/red_getting_started/\n"
+              "Press enter to continue")
+        input("\n")
+
+
+def set_logger(bot):
+    logger = logging.getLogger("red")
+    logger.setLevel(logging.INFO)
+
+    red_format = logging.Formatter(
+        '%(asctime)s %(levelname)s %(module)s %(funcName)s %(lineno)d: '
+        '%(message)s',
+        datefmt="[%d/%m/%Y %H:%M]")
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(red_format)
+    if bot.settings.debug:
+        stdout_handler.setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
+    else:
+        stdout_handler.setLevel(logging.INFO)
+        logger.setLevel(logging.INFO)
+
+    fhandler = logging.handlers.RotatingFileHandler(
+        filename='data/red/red.log', encoding='utf-8', mode='a',
+        maxBytes=10**7, backupCount=5)
+    fhandler.setFormatter(red_format)
+
+    logger.addHandler(fhandler)
+    logger.addHandler(stdout_handler)
+
+    dpy_logger = logging.getLogger("discord")
+    if bot.settings.debug:
+        dpy_logger.setLevel(logging.DEBUG)
+    else:
+        dpy_logger.setLevel(logging.WARNING)
+    handler = logging.FileHandler(
+        filename='data/red/discord.log', encoding='utf-8', mode='a')
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s %(module)s %(funcName)s %(lineno)d: '
+        '%(message)s',
+        datefmt="[%d/%m/%Y %H:%M]"))
+    dpy_logger.addHandler(handler)
+
+    return logger
+
+
+def ensure_reply(msg):
+    choice = ""
+    while choice == "":
+        choice = input(msg)
+    return choice
+
+
+def get_answer():
+    choices = ("yes", "y", "no", "n")
+    c = ""
+    while c not in choices:
+        c = input(">").lower()
+    if c.startswith("y"):
+        return True
+    else:
+        return False
+
+
+def set_cog(cog, value):  # TODO: move this out of red.py
+    data = dataIO.load_json("data/red/cogs.json")
+    data[cog] = value
+    dataIO.save_json("data/red/cogs.json", data)
+
+
+def load_cogs(bot):
+    defaults = ("alias", "audio", "customcom", "downloader", "economy",
+                "general", "image", "mod", "streams", "trivia")
+
+    try:
+        registry = dataIO.load_json("data/red/cogs.json")
+    except:
+        registry = {}
+
+    bot.load_extension('cogs.owner')
+    owner_cog = bot.get_cog('Owner')
+    if owner_cog is None:
+        print("The owner cog is missing. It contains core functions without "
+              "which Red cannot function. Reinstall.")
+        exit(1)
+
+    if bot.settings._no_cogs:
+        bot.logger.debug("Skipping initial cogs loading (--no-cogs)")
+        if not os.path.isfile("data/red/cogs.json"):
+            dataIO.save_json("data/red/cogs.json", {})
         return
 
-    for filename in FFMPEG_FILES:
-        if os.path.isfile(filename):
-            print("{} already present. Verifying integrity... "
-                  "".format(filename), end="")
-            _hash = calculate_md5(filename)
-            if _hash == FFMPEG_FILES[filename]:
-                verified.append(filename)
-                print("Ok")
-                continue
-            else:
-                print("Hash mismatch. Redownloading.")
-        print("Downloading {}... Please wait.".format(filename))
-        with urllib.request.urlopen(repo + filename) as data:
-            with open(filename, "wb") as f:
-                f.write(data.read())
-        print("Download completed.")
+    failed = []
+    extensions = owner_cog._list_cogs()
 
-    for filename, _hash in FFMPEG_FILES.items():
-        if filename in verified:
+    if not registry:  # All default cogs enabled by default
+        for ext in defaults:
+            registry["cogs." + ext] = True
+
+    for extension in extensions:
+        if extension.lower() == "cogs.owner":
             continue
-        print("Verifying {}... ".format(filename), end="")
-        if not calculate_md5(filename) != _hash:
-            print("Passed.")
-        else:
-            print("Hash mismatch. Please redownload.")
+        to_load = registry.get(extension, False)
+        if to_load:
+            try:
+                owner_cog._load_cog(extension)
+            except Exception as e:
+                print("{}: {}".format(e.__class__.__name__, str(e)))
+                bot.logger.exception(e)
+                failed.append(extension)
+                registry[extension] = False
 
-    print("\nAll files have been downloaded.")
+    dataIO.save_json("data/red/cogs.json", registry)
+
+    if failed:
+        print("\nFailed to load: {}\n".format(" ".join(failed)))
 
 
-def verify_requirements():
-    sys.path_importer_cache = {} # I don't know if the cache reset has any
-    basic = find_spec("discord") # side effect. Without it, the lib folder
-    audio = find_spec("nacl")    # wouldn't be seen if it didn't exist
-    if not basic:                # when the launcher was started
-        return None
-    elif not audio:
-        return False
+def main(bot):
+    check_folders()
+    if not bot.settings.no_prompt:
+        interactive_setup(bot.settings)
+    load_cogs(bot)
+
+    if bot.settings._dry_run:
+        print("Quitting: dry run")
+        bot._shutdown_mode = True
+        exit(0)
+
+    print("Logging into Discord...")
+    bot.uptime = datetime.datetime.utcnow()
+
+    if bot.settings.login_credentials:
+        yield from bot.login(*bot.settings.login_credentials,
+                             bot=not bot.settings.self_bot)
     else:
-        return True
+        print("No credentials available to login.")
+        raise RuntimeError()
+    yield from bot.connect()
 
-
-def is_git_installed():
-    try:
-        subprocess.call(["git", "--version"], stdout=subprocess.DEVNULL,
-                                              stdin =subprocess.DEVNULL,
-                                              stderr=subprocess.DEVNULL)
-    except FileNotFoundError:
-        return False
-    else:
-        return True
-
-
-def requirements_menu():
-    clear_screen()
-    while True:
-        print(INTRO)
-        print("Main requirements:\n")
-        print("1. Install basic + audio requirements (recommended)")
-        print("2. Install basic requirements")
-        if IS_WINDOWS:
-            print("\nffmpeg (required for audio):")
-            print("3. Install ffmpeg 32bit")
-            if IS_64BIT:
-                print("4. Install ffmpeg 64bit (recommended on Windows 64bit)")
-        print("\n0. Go back")
-        choice = user_choice()
-        if choice == "1":
-            install_reqs(audio=True)
-            wait()
-        elif choice == "2":
-            install_reqs(audio=False)
-            wait()
-        elif choice == "3" and IS_WINDOWS:
-            download_ffmpeg(bitness="32bit")
-            wait()
-        elif choice == "4" and (IS_WINDOWS and IS_64BIT):
-            download_ffmpeg(bitness="64bit")
-            wait()
-        elif choice == "0":
-            break
-        clear_screen()
-
-
-def update_menu():
-    clear_screen()
-    while True:
-        print(INTRO)
-        reqs = verify_requirements()
-        if reqs is None:
-            status = "No requirements installed"
-        elif reqs is False:
-            status = "Basic requirements installed (no audio)"
-        else:
-            status = "Basic + audio requirements installed"
-        print("Status: " + status + "\n")
-        print("Update:\n")
-        print("Red:")
-        print("1. Update Red + requirements (recommended)")
-        print("2. Update Red")
-        print("3. Update requirements")
-        print("\nOthers:")
-        print("4. Update pip (might require admin privileges)")
-        print("\n0. Go back")
-        choice = user_choice()
-        if choice == "1":
-            update_red()
-            print("Updating requirements...")
-            reqs = verify_requirements()
-            if reqs is not None:
-                install_reqs(audio=reqs)
-            else:
-                print("The requirements haven't been installed yet.")
-            wait()
-        elif choice == "2":
-            update_red()
-            wait()
-        elif choice == "3":
-            reqs = verify_requirements()
-            if reqs is not None:
-                install_reqs(audio=reqs)
-            else:
-                print("The requirements haven't been installed yet.")
-            wait()
-        elif choice == "4":
-            update_pip()
-            wait()
-        elif choice == "0":
-            break
-        clear_screen()
-
-
-def maintenance_menu():
-    clear_screen()
-    while True:
-        print(INTRO)
-        print("Maintenance:\n")
-        print("1. Repair Red (discards code changes, keeps data intact)")
-        print("2. Wipe 'data' folder (all settings, cogs' data...)")
-        print("3. Wipe 'lib' folder (all local requirements / local installed"
-              " python packages)")
-        print("4. Factory reset")
-        print("\n0. Go back")
-        choice = user_choice()
-        if choice == "1":
-            print("Any code modification you have made will be lost. Data/"
-                  "non-default cogs will be left intact. Are you sure?")
-            if user_pick_yes_no():
-                reset_red(git_reset=True)
-                wait()
-        elif choice == "2":
-            print("Are you sure? This will wipe the 'data' folder, which "
-                  "contains all your settings and cogs' data.\nThe 'cogs' "
-                  "folder, however, will be left intact.")
-            if user_pick_yes_no():
-                reset_red(data=True)
-                wait()
-        elif choice == "3":
-            reset_red(reqs=True)
-            wait()
-        elif choice == "4":
-            print("Are you sure? This will wipe ALL your Red's installation "
-                  "data.\nYou'll lose all your settings, cogs and any "
-                  "modification you have made.\nThere is no going back.")
-            if user_pick_yes_no():
-                reset_red(reqs=True, data=True, cogs=True, git_reset=True)
-                wait()
-        elif choice == "0":
-            break
-        clear_screen()
-
-
-def run_red(autorestart):
-    interpreter = sys.executable
-
-    if interpreter is None: # This should never happen
-        raise RuntimeError("Couldn't find Python's interpreter")
-
-    if verify_requirements() is None:
-        print("You don't have the requirements to start Red. "
-              "Install them from the launcher.")
-        if not INTERACTIVE_MODE:
-            exit(1)
-
-    cmd = (interpreter, "red.py")
-
-    while True:
-        try:
-            code = subprocess.call(cmd)
-        except KeyboardInterrupt:
-            code = 0
-            break
-        else:
-            if code == 0:
-                break
-            elif code == 26:
-                print("Restarting Red...")
-                continue
-            else:
-                if not autorestart:
-                    break
-
-    print("Red has been terminated. Exit code: %d" % code)
-
-    if INTERACTIVE_MODE:
-        wait()
-
-
-def clear_screen():
-    if IS_WINDOWS:
-        os.system("cls")
-    else:
-        os.system("clear")
-
-
-def wait():
-    if INTERACTIVE_MODE:
-        input("Press enter to continue.")
-
-
-def user_choice():
-    return input("> ").lower().strip()
-
-
-def user_pick_yes_no():
-    choice = None
-    yes = ("yes", "y")
-    no = ("no", "n")
-    while choice not in yes and choice not in no:
-        choice = input("Yes/No > ").lower().strip()
-    return choice in yes
-
-
-def remove_readonly(func, path, excinfo):
-    os.chmod(path, 0o755)
-    func(path)
-
-
-def remove_reqs_readonly():
-    """Workaround for issue #569"""
-    if not os.path.isdir(REQS_DIR):
-        return
-    os.chmod(REQS_DIR, 0o755)
-    for root, dirs, files in os.walk(REQS_DIR):
-        for d in dirs:
-            os.chmod(os.path.join(root, d), 0o755)
-        for f in files:
-            os.chmod(os.path.join(root, f), 0o755)
-
-
-def calculate_md5(filename):
-    hash_md5 = hashlib.md5()
-    with open(filename, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
-
-
-def create_fast_start_scripts():
-    """Creates scripts for fast boot of Red without going
-    through the launcher"""
-    interpreter = sys.executable
-    if not interpreter:
-        return
-
-    call = "\"{}\" launcher.py".format(interpreter)
-    start_red = "{} --start".format(call)
-    start_red_autorestart = "{} --start --auto-restart".format(call)
-    modified = False
-
-    if IS_WINDOWS:
-        ccd = "pushd %~dp0\n"
-        pause = "\npause"
-        ext = ".bat"
-    else:
-        ccd = 'cd "$(dirname "$0")"\n'
-        pause = "\nread -rsp $'Press enter to continue...\\n'"
-        if not IS_MAC:
-            ext = ".sh"
-        else:
-            ext = ".command"
-
-    start_red             = ccd + start_red             + pause
-    start_red_autorestart = ccd + start_red_autorestart + pause
-
-    files = {
-        "start_red"             + ext : start_red,
-        "start_red_autorestart" + ext : start_red_autorestart
-    }
-
-    if not IS_WINDOWS:
-        files["start_launcher" + ext] = ccd + call
-
-    for filename, content in files.items():
-        if not os.path.isfile(filename):
-            print("Creating {}... (fast start scripts)".format(filename))
-            modified = True
-            with open(filename, "w") as f:
-                f.write(content)
-
-    if not IS_WINDOWS and modified: # Let's make them executable on Unix
-        for script in files:
-            st = os.stat(script)
-            os.chmod(script, st.st_mode | stat.S_IEXEC)
-
-
-def main():
-    print("Verifying git installation...")
-    has_git = is_git_installed()
-    is_git_installation = os.path.isdir(".git")
-    if IS_WINDOWS:
-        os.system("TITLE Red Discord Bot - Launcher")
-    clear_screen()
-
-    try:
-        create_fast_start_scripts()
-    except Exception as e:
-        print("Failed making fast start scripts: {}\n".format(e))
-
-    while True:
-        print(INTRO)
-
-        if not is_git_installation:
-            print("WARNING: It doesn't look like Red has been "
-                  "installed with git.\nThis means that you won't "
-                  "be able to update and some features won't be working.\n"
-                  "A reinstallation is recommended. Follow the guide "
-                  "properly this time:\n"
-                  "https://twentysix26.github.io/Red-Docs/\n")
-
-        if not has_git:
-            print("WARNING: Git not found. This means that it's either not "
-                  "installed or not in the PATH environment variable like "
-                  "requested in the guide.\n")
-
-        print("1. Run Red /w autorestart in case of issues")
-        print("2. Run Red")
-        print("3. Update")
-        print("4. Install requirements")
-        print("5. Maintenance (repair, reset...)")
-        print("\n0. Quit")
-        choice = user_choice()
-        if choice == "1":
-            run_red(autorestart=True)
-        elif choice == "2":
-            run_red(autorestart=False)
-        elif choice == "3":
-            update_menu()
-        elif choice == "4":
-            requirements_menu()
-        elif choice == "5":
-            maintenance_menu()
-        elif choice == "0":
-            break
-        clear_screen()
-
-args = parse_cli_arguments()
 
 if __name__ == '__main__':
-    abspath = os.path.abspath(__file__)
-    dirname = os.path.dirname(abspath)
-    # Sets current directory to the script's
-    os.chdir(dirname)
-    if not PYTHON_OK:
-        print("Red needs Python 3.5 or superior. Install the required "
-              "version.\nPress enter to continue.")
-        if INTERACTIVE_MODE:
-            wait()
-        exit(1)
-    if pip is None:
-        print("Red cannot work without the pip module. Please make sure to "
-              "install Python without unchecking any option during the setup")
-        wait()
-        exit(1)
-    if args.repair:
-        reset_red(git_reset=True)
-    if args.update_red:
-        update_red()
-    if args.update_reqs:
-        install_reqs(audio=True)
-    elif args.update_reqs_no_audio:
-        install_reqs(audio=False)
-    if INTERACTIVE_MODE:
-        main()
-    elif args.start:
-        print("Starting Red...")
-        run_red(autorestart=args.auto_restart)
+    sys.stdout = TextIOWrapper(sys.stdout.detach(),
+                               encoding=sys.stdout.encoding,
+                               errors="replace",
+                               line_buffering=True)
+    bot = initialize()
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main(bot))
+    except discord.LoginFailure:
+        bot.logger.error(traceback.format_exc())
+        if not bot.settings.no_prompt:
+            choice = input("Invalid login credentials. If they worked before "
+                           "Discord might be having temporary technical "
+                           "issues.\nIn this case, press enter and try again "
+                           "later.\nOtherwise you can type 'reset' to reset "
+                           "the current credentials and set them again the "
+                           "next start.\n> ")
+            if choice.lower().strip() == "reset":
+                bot.settings.token = None
+                bot.settings.email = None
+                bot.settings.password = None
+                bot.settings.save_settings()
+                print("Login credentials have been reset.")
+    except KeyboardInterrupt:
+        loop.run_until_complete(bot.logout())
+    except Exception as e:
+        bot.logger.exception("Fatal exception, attempting graceful logout",
+                             exc_info=e)
+        loop.run_until_complete(bot.logout())
+    finally:
+        loop.close()
+        if bot._shutdown_mode is True:
+            exit(0)
+        elif bot._shutdown_mode is False:
+            exit(26) # Restart
+        else:
+            exit(1)
